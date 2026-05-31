@@ -90,11 +90,17 @@ ls helix-db-local/
 
 ### 3. Create your .env file
 
-Create a file named `.env` in the project root with the following contents:
+Copy the example file and fill in your keys:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` and replace the placeholder values:
 
 ```env
 # Required — get your key at https://dashboard.voyageai.com
-VOYAGE_API_KEY=your_voyage_api_key_here
+VOYAGE_API_KEY=your_actual_key_here
 VOYAGE_EMBED_MODEL=voyage-3.5
 VOYAGE_RETRIEVAL_MODEL=voyage-3.5
 
@@ -106,6 +112,11 @@ HELIX_PORT=6969
 # Get your key at https://console.groq.com
 GROQ_API_KEY=your_groq_api_key_here
 ```
+
+IMPORTANT: The .env file must have NO quotes around values and NO extra spaces.
+Correct:   VOYAGE_API_KEY=pa-abc123
+Wrong:     VOYAGE_API_KEY="pa-abc123"
+Wrong:     VOYAGE_API_KEY = pa-abc123
 
 Never commit your .env file — it is already in .gitignore.
 
@@ -140,15 +151,38 @@ The Electron app will launch. Use the search bar to index a directory and start 
 
 ## Testing search from the CLI
 
+First create a test directory with sample files:
+
 ```bash
+mkdir -p /tmp/test-index
+echo "This is a test file about semantic search and AI embeddings" > /tmp/test-index/readme.txt
+echo "Authentication happens in jwt_middleware and token_validator" > /tmp/test-index/auth.txt
+echo "Database connection pooling and query optimization" > /tmp/test-index/db.txt
+```
+
+Then run the indexer and search:
+
+```bash
+cd ~/the-search-thing
 set -a && source .env && set +a
 
 (
-  echo '{"jsonrpc":"2.0","id":1,"method":"index.start","params":{"dir":"/path/to/your/dir"}}'
-  sleep 60
-  echo '{"jsonrpc":"2.0","id":2,"method":"search.query","params":{"q":"your search query"}}'
+  echo '{"jsonrpc":"2.0","id":1,"method":"index.start","params":{"dir":"/tmp/test-index"}}'
+  sleep 90
+  echo '{"jsonrpc":"2.0","id":2,"method":"search.query","params":{"q":"authentication jwt"}}'
+  sleep 2
+  echo '{"jsonrpc":"2.0","id":3,"method":"search.query","params":{"q":"semantic search"}}'
 ) | ./target/debug/the-search-thing-sidecar 2>&1 | cat
 ```
+
+Expected output: search results showing the correct files ranked by semantic similarity.
+
+Common errors and fixes:
+
+1. "Model  is not supported" — VOYAGE_EMBED_MODEL is missing from .env
+2. "command not found" after source .env — .env has wrong format (remove quotes around values)
+3. "connection refused" — HelixDB is not running, run: helix run dev
+4. indexed=0, errors=1 — check VOYAGE_API_KEY is valid at https://dashboard.voyageai.com
 
 ---
 
