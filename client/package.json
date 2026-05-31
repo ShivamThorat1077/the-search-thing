@@ -1,0 +1,79 @@
+{
+  "name": "the-search-thing",
+  "version": "12.0.0",
+  "description": "A modern Electron application template with React, Vite, TypeScript, Shadcn UI and TailwindCSS",
+  "homepage": "https://the-search-thing.vercel.app",
+  "license": "GPL-3.0-only",
+  "author": {
+    "name": "the-search-thing",
+    "url": "https://github.com/AmaanBilwar/the-search-thing"
+  },
+  "main": "./out/main/main.js",
+  "scripts": {
+    "dev": "cross-env ELECTRON_DISABLE_SANDBOX=1 electron-vite dev -w",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "start": "electron-vite preview",
+    "sidecar:build:debug": "cargo build --manifest-path ../Cargo.toml --bin the-search-thing-sidecar",
+    "sidecar:test:jrpc": "cargo test --manifest-path ../Cargo.toml --test sidecar_jrpc -- --test-threads=1",
+    "sidecar:stage": "node ./scripts/stage-sidecar.cjs",
+    "ffmpeg:fetch-windows": "bash ./scripts/fetch-ffmpeg-windows.sh",
+    "ffmpeg:fetch-linux": "bash ./scripts/fetch-ffmpeg-linux.sh",
+    "postinstall": "electron-builder install-app-deps",
+    "vite:build:app": "electron-vite build",
+    "electron:build:win": "electron-builder --win",
+    "electron:build:mac": "electron-builder --mac",
+    "electron:build:linux": "electron-builder --linux",
+    "electron:build:dir": "electron-builder --dir",
+    "build:win": "run-s ffmpeg:fetch-windows sidecar:stage vite:build:app electron:build:win",
+    "build:mac": "run-s sidecar:stage vite:build:app electron:build:mac",
+    "build:linux": "run-s ffmpeg:fetch-linux sidecar:stage vite:build:app electron:build:linux"
+  },
+  "dependencies": {
+    "@electron-toolkit/preload": "^3.0.2",
+    "@electron-toolkit/utils": "^4.0.0",
+    "@radix-ui/react-slot": "^1.2.3",
+    "axios": "^1.13.4",
+    "better-sqlite3": "^12.4.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "dotenv": "^17.4.2",
+    "lucide-react": "^0.541.0",
+    "react-router-dom": "^7.13.0",
+    "tailwind-merge": "^3.3.1",
+    "zod": "^4.1.3"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^1.0.1",
+    "@eslint/js": "^9.34.0",
+    "@tailwindcss/vite": "^4.1.12",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.11",
+    "@types/react-dom": "^19.1.8",
+    "@vitejs/plugin-react": "^5.0.1",
+    "cross-env": "^10.0.0",
+    "electron": "^37.3.1",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.0",
+    "eslint": "^9.34.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "npm-run-all": "^4.1.5",
+    "oxfmt": "^0.27.0",
+    "oxlint": "^1.62.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "tailwindcss": "^4.1.12",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.41.0",
+    "vite": "^6.4.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  }
+}

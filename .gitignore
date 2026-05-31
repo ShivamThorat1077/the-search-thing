@@ -1,0 +1,51 @@
+# venv
+.venv/
+
+# dist
+dist/
+
+# env vars
+.env
+.env.*
+
+# rust
+target/
+
+# python
+uv.lock
+__pycache__/
+
+# misc
+backup.txt
+replacements.txt
+fix-env.sh
+rewrite-env-history.ps1
+
+# helix
+.helix/
+*.log
+
+#electron
+node_modules/
+.webpack/
+
+
+client/resources/
+
+linux/
+.ruff_cache/
+client/videos/output_indexer/
+client/videos/thumbnails/
+backend.spec
+backend/build/backend/
+lazygit
+backend/build/backend/
+client/resources/backend/
+client/resources/ffmpeg/
+backend.spec
+helix-db-local/
+helix-rs-local/
+.env
+target/
+client/node_modules/
+client/out/

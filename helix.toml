@@ -1,0 +1,12 @@
+[project]
+name = "tst"
+queries = "./db/"
+container_runtime = "docker"
+
+[local]
+
+[enterprise]
+
+[local.dev]
+port = 6969
+build_mode = "dev"

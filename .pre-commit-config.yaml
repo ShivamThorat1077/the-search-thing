@@ -1,0 +1,41 @@
+default_install_hook_types:
+  - post-commit
+
+default_stages:
+  - post-commit
+
+fail_fast: false
+
+repos:
+  # Rust formatter
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all
+        language: system
+        files: \.rs$
+        pass_filenames: false
+        always_run: true
+
+  # Client (Electron/React) formatter
+  - repo: local
+    hooks:
+      - id: client-oxfmt
+        name: oxfmt (client)
+        entry: bash -c "cd client && npx oxfmt --write ."
+        language: system
+        files: ^client/.*\.(js|jsx|ts|tsx|json)$
+        pass_filenames: false
+        always_run: true
+
+  # Website (Next.js) formatter
+  - repo: local
+    hooks:
+      - id: website-oxfmt
+        name: oxfmt (website)
+        entry: bash -c "cd website && npx oxfmt --write ."
+        language: system
+        files: ^website/.*\.(js|jsx|ts|tsx|json)$
+        pass_filenames: false
+        always_run: true

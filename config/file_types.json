@@ -1,0 +1,5 @@
+{
+  "video": [".mp4", ".mov"],
+  "image": [".jpeg", ".jpg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tiff"],
+  "text": [".text", ".txt"]
+}
