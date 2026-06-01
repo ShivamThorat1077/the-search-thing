@@ -44,21 +44,57 @@ Nodes inserted before the index exists are not backfilled and are invisible to v
 
 ## Setup & Running (Reviewer Guide)
 
-### Prerequisites
+Tested and verified on Ubuntu 24.04 LTS.
 
-- Rust (stable) — https://rustup.rs
-- Node.js 18+ and npm
-- Docker
-- HelixDB CLI — https://helix-db.com/docs/installation
+### System Requirements
 
-### 1. Clone this fork
+- Ubuntu 24.04+ — REQUIRED. HelixDB CLI requires GLIBC 2.39 which ships with Ubuntu 24.04+. Ubuntu 22.04 and older will not work.
+- Docker — required by HelixDB CLI to run the database container
+- Rust stable — for building the sidecar backend
+- Node.js 20+ — react-router-dom and other packages require Node 20+
+- build-essential — C compiler required for cargo build
+
+### Step 1 — Install system dependencies
+
+```bash
+# C compiler and OpenSSL (required for cargo build)
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libssl-dev
+
+# Docker
+sudo apt-get install -y docker.io
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Rust (use rustup, NOT apt)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# Node.js 20+ (NOT the default apt version which is 18)
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# Verify versions
+node --version    # must be v20+
+rustc --version
+docker --version
+
+# HelixDB CLI
+curl -fsSL https://install.helix-db.com | bash
+source ~/.bashrc
+helix --version   # should show 3.0.2
+```
+
+### Step 2 — Clone this fork
 
 ```bash
 git clone https://github.com/ShivamThorat1077/the-search-thing.git
 cd the-search-thing
 ```
 
-### 2. Set up the HelixDB local SDK
+### Step 3 — Set up the HelixDB local SDK
 
 The project depends on the `helix-db` Rust SDK as a local path dependency.
 The folder MUST be named `helix-db-local` and placed directly inside the project root.
@@ -68,59 +104,57 @@ Expected structure:
     the-search-thing/       <- project root
         helix-db-local/     <- SDK goes HERE (this exact name, this exact location)
             Cargo.toml
-            src/
+            helix-cli/
+            sdks/
         src/
         client/
         Cargo.toml
 
-Clone it with this command from inside the project root:
+Clone it from inside the project root:
 
 ```bash
 git clone https://github.com/HelixDB/helix-db.git helix-db-local
 ```
 
-Verify it worked:
+Verify:
 
 ```bash
 ls helix-db-local/
-# Should show: Cargo.toml  src/  ...
+# Should show: Cargo.toml  helix-cli/  sdks/  assets/  ...
 ```
 
 `Cargo.toml` already points to `helix-db-local/` — no other changes needed.
 
-### 3. Create your .env file
-
-Copy the example file and fill in your keys:
+### Step 4 — Create your .env file
 
 ```bash
 cp .env.example .env
+nano .env
 ```
 
-Then edit `.env` and replace the placeholder values:
+Fill in your keys. The file must look exactly like this — NO quotes, NO spaces around =:
 
 ```env
-# Required — get your key at https://dashboard.voyageai.com
 VOYAGE_API_KEY=your_actual_key_here
 VOYAGE_EMBED_MODEL=voyage-3.5
 VOYAGE_RETRIEVAL_MODEL=voyage-3.5
-
-# HelixDB (default values — change only if your setup differs)
 HELIX_ENDPOINT=http://localhost
 HELIX_PORT=6969
-
-# Optional — enables image and video indexing
-# Get your key at https://console.groq.com
-GROQ_API_KEY=your_groq_api_key_here
+GROQ_API_KEY=your_groq_key_here
 ```
 
-IMPORTANT: The .env file must have NO quotes around values and NO extra spaces.
+Get your Voyage API key at https://dashboard.voyageai.com
+Get your Groq API key at https://console.groq.com (optional — only needed for image/video indexing)
+
+IMPORTANT:
 Correct:   VOYAGE_API_KEY=pa-abc123
 Wrong:     VOYAGE_API_KEY="pa-abc123"
 Wrong:     VOYAGE_API_KEY = pa-abc123
 
-Never commit your .env file — it is already in .gitignore.
+Wrong format causes keys to be executed as shell commands and leaks them to the terminal.
 
-### 4. Start HelixDB
+
+### Step 5 — Start HelixDB
 
 ```bash
 helix run dev
@@ -128,16 +162,25 @@ helix run dev
 
 This starts the enterprise-dev container at http://localhost:6969.
 
-WARNING: This uses in-memory storage — stopping the container wipes all indexed data.
+Verify it is running:
+
+```bash
+curl http://localhost:6969
+```
+
+WARNING: HelixDB enterprise-dev uses in-memory storage.
+Stopping or restarting the container wipes all indexed data.
 Re-indexing after a restart takes only a few minutes for small directories.
 
-### 5. Build the Rust sidecar
+### Step 6 — Build the Rust sidecar
 
 ```bash
 cargo build --bin the-search-thing-sidecar
 ```
 
-### 6. Install frontend dependencies and run
+This takes 2-5 minutes on first build.
+
+### Step 7 — Install frontend dependencies and run
 
 ```bash
 cd client
@@ -145,54 +188,62 @@ npm install
 npm run dev
 ```
 
-The Electron app will launch. Use the search bar to index a directory and start searching.
+The Electron app will launch automatically.
+Use the search bar to index a directory and start searching.
+Click a result to see the file content preview in the right panel.
 
 ---
 
-## Testing search from the CLI
+## Verify everything works (CLI test)
 
-First create a test directory with sample files:
+Before using the UI, confirm the full pipeline works from the command line:
 
 ```bash
+# Create sample test files
 mkdir -p /tmp/test-index
-echo "This is a test file about semantic search and AI embeddings" > /tmp/test-index/readme.txt
-echo "Authentication happens in jwt_middleware and token_validator" > /tmp/test-index/auth.txt
-echo "Database connection pooling and query optimization" > /tmp/test-index/db.txt
-```
+echo "semantic search using AI embeddings" > /tmp/test-index/readme.txt
+echo "jwt authentication middleware token validator" > /tmp/test-index/auth.txt
 
-Then run the indexer and search:
-
-```bash
+# Load env
 cd ~/the-search-thing
 set -a && source .env && set +a
 
+# Run index + search
 (
   echo '{"jsonrpc":"2.0","id":1,"method":"index.start","params":{"dir":"/tmp/test-index"}}'
   sleep 90
-  echo '{"jsonrpc":"2.0","id":2,"method":"search.query","params":{"q":"authentication jwt"}}'
+  echo '{"jsonrpc":"2.0","id":2,"method":"search.query","params":{"q":"authentication"}}'
   sleep 2
   echo '{"jsonrpc":"2.0","id":3,"method":"search.query","params":{"q":"semantic search"}}'
 ) | ./target/debug/the-search-thing-sidecar 2>&1 | cat
 ```
 
-Expected output: search results showing the correct files ranked by semantic similarity.
+Expected result: both queries return auth.txt and readme.txt ranked by semantic similarity.
+If you see `indexed=2, errors=0` and results in the search response — everything is working.
 
-Common errors and fixes:
+---
 
-1. "Model  is not supported" — VOYAGE_EMBED_MODEL is missing from .env
-2. "command not found" after source .env — .env has wrong format (remove quotes around values)
-3. "connection refused" — HelixDB is not running, run: helix run dev
-4. indexed=0, errors=1 — check VOYAGE_API_KEY is valid at https://dashboard.voyageai.com
+## Common errors and fixes
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `GLIBC_2.39 not found` | Ubuntu version too old | Upgrade to Ubuntu 24.04+ |
+| `linker cc not found` | build-essential not installed | `sudo apt-get install -y build-essential` |
+| `cross-env not found` | Node.js version too old | Install Node 20+ via nodesource |
+| `Model  is not supported` | VOYAGE_EMBED_MODEL missing or empty | Add `VOYAGE_EMBED_MODEL=voyage-3.5` to .env |
+| Keys run as shell commands | .env values have quotes or spaces | Remove all quotes, remove spaces around = |
+| `connection refused` on port 6969 | HelixDB not running | Run `helix run dev` |
+| `indexed=0, errors=N` | Bad API key or HelixDB not running | Check VOYAGE_API_KEY and run `curl http://localhost:6969` |
+| `pkg-config not found` | Missing system library | `sudo apt-get install -y pkg-config libssl-dev` |
+| `Docker not available` | Docker not installed or not running | Install docker.io and run `sudo systemctl start docker` |
 
 ---
 
 ## Rate limits
 
-Voyage AI free tier: 3 RPM. The indexer includes a 21-second delay between embedding calls.
+Voyage AI free tier: 3 RPM. The indexer has a built-in 21-second delay between embedding calls to stay within this limit. Indexing 3 files takes approximately 2 minutes.
 
-To remove the delay, add a payment method at https://dashboard.voyageai.com (rate limit
-increases to 300+ RPM), then remove the two sleep(Duration::from_secs(21)) calls in
-src/sidecar/rpc/indexing/text/mod.rs.
+To remove the delay: add a payment method at https://dashboard.voyageai.com (rate limit increases to 300+ RPM), then remove the two `sleep(Duration::from_secs(21))` calls in `src/sidecar/rpc/indexing/text/mod.rs`.
 
 ---
 
