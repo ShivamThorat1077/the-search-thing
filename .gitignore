@@ -30,8 +30,6 @@ node_modules/
 .webpack/
 
 
-client/resources/
-
 linux/
 .ruff_cache/
 client/videos/output_indexer/
