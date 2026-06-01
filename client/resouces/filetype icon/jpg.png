@@ -1,0 +1,10 @@
+export { default as doc } from "./doc.png";
+export { default as exe } from "./exe.png";
+export { default as jpg } from "./jpg.png";
+export { default as json } from "./json.png";
+export { default as mp4 } from "./mp4.png";
+export { default as pdf } from "./pdf.png";
+export { default as png } from "./png.png";
+export { default as ppt } from "./ppt.png";
+export { default as svg } from "./svg.png";
+export { default as txt } from "./txt.png";
