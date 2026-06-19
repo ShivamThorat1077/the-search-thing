@@ -410,8 +410,16 @@ where
         }
 
         while let Some(joined) = set.join_next().await {
-            if let Ok((key, Ok(payload))) = joined {
-                map.insert(key, payload);
+            match joined {
+                Ok((key, Ok(payload))) => {
+                    map.insert(key, payload);
+                }
+                Ok((key, Err(e))) => {
+                    eprintln!("[sidecar:video] transcription failed for chunk {}: {}", key, e);
+                }
+                Err(e) => {
+                    eprintln!("[sidecar:video] transcription task panicked: {}", e);
+                }
             }
         }
     }
@@ -425,40 +433,59 @@ async fn generate_frame_summaries<C>(
 where
     C: TranscriptionClient + Clone + 'static,
 {
+    eprintln!(
+        "[sidecar:video] generate_frame_summaries called with {} artifacts",
+        artifacts.len()
+    );
     let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
 
-    let mut flat_items: Vec<(String, usize, Vec<u8>)> = Vec::new();
     for artifact in artifacts {
         let chunk_stem = Path::new(&artifact.chunk_path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
+
         for (idx, path) in artifact.thumbnail_paths.iter().enumerate() {
-            if let Ok(bytes) = fs::read(path) {
-                flat_items.push((chunk_stem.clone(), idx, bytes));
+            let image_id = format!("{}_{}", chunk_stem, idx);
+
+            let mut attempts = 0u32;
+            loop {
+                let bytes = match fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!(
+                            "[sidecar:video] failed to read thumbnail {}: {}",
+                            path, e
+                        );
+                        break;
+                    }
+                };
+                match groq.summarize_image_bytes(&image_id, bytes).await {
+                    Ok(entry) => {
+                        grouped.entry(chunk_stem.clone()).or_default().push(entry);
+                        break;
+                    }
+                    Err(e) if e.contains("429") && attempts < 3 => {
+                        attempts += 1;
+                        eprintln!(
+                            "[sidecar:video] rate limited on {}, retry {} in 10s",
+                            image_id, attempts
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[sidecar:video] frame summary failed for {}: {}",
+                            image_id, e
+                        );
+                        break;
+                    }
+                }
             }
-        }
-    }
 
-    for batch in flat_items.chunks(4) {
-        let mut set = JoinSet::new();
-        for (chunk_stem, idx, bytes) in batch {
-            let client = groq.clone();
-            let chunk_stem_clone = chunk_stem.clone();
-            let bytes_clone = bytes.clone();
-            let image_id = format!("{}_{}", chunk_stem_clone, idx);
-
-            set.spawn(async move {
-                let result = client.summarize_image_bytes(&image_id, bytes_clone).await;
-                (chunk_stem_clone, result)
-            });
-        }
-
-        while let Some(joined) = set.join_next().await {
-            if let Ok((chunk_stem, Ok(entry))) = joined {
-                grouped.entry(chunk_stem).or_default().push(entry);
-            }
+            // Pace requests — ~5.5s gap keeps TPM under 30k (each image ~2500 tokens)
+            tokio::time::sleep(tokio::time::Duration::from_millis(5500)).await;
         }
     }
 
