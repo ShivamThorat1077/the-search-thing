@@ -27,7 +27,7 @@ This fork migrates the HelixDB integration from the old `helix-rs` SDK (stored `
 | `Cargo.toml` | Replaced `helix-rs` with `helix-db` local path dependency |
 | `src/sidecar/rpc/indexing/adapters/helix.rs` | Full rewrite — all 6 queries use dynamic query DSL |
 | `src/sidecar/rpc/search.rs` | Updated to use `HelixTextStore.search_asset_embeddings()`, fixed response parsing |
-| `src/sidecar/rpc/indexing/text/mod.rs` | Added rate limiter (21s delay) for Voyage free tier |
+| `src/sidecar/rpc/indexing/text/mod.rs` | Added rate limiter for Voyage free tier |
 | `db/queries.hx` | UpsertV/UpsertE replaced with AddV/AddE; SearchAssetEmbeddings returns both assets and embeddings |
 | `db/schema.hx` | No changes — compatible as-is |
 
@@ -39,6 +39,53 @@ Nodes inserted before the index exists are not backfilled and are invisible to v
 `ensure_indexes()` is now called automatically at the start of every indexing job, creating:
 - HNSW vector index on AssetEmbedding/vector
 - Equality index on Asset/content_hash (speeds up duplicate detection)
+
+Because HelixDB's HNSW index does not appear to pick up nodes inserted *after* the index already exists, `rebuild_vector_index()` is also called at the end of every indexing job. This drops and recreates the vector index so newly inserted embeddings (including video frame summaries added later in the job) are guaranteed to be searchable.
+
+---
+
+## Image & Video Indexing
+
+In addition to text files, the indexer can process images and videos and make their content semantically searchable.
+
+### How it works
+
+**Images**
+- Each image is sent to a Groq vision model (`meta-llama/llama-4-scout-17b-16e-instruct`), which returns a structured JSON summary (summary, objects, actions, setting, OCR text, quality).
+- The summary is formatted into embeddable text and stored as an `AssetEmbedding` linked to the image's `Asset` node.
+
+**Videos**
+- Each video is split into fixed-length chunks with `ffmpeg`.
+- Per chunk, the indexer extracts:
+  - An audio track (if present), transcribed with Groq Whisper (`whisper-large-v3-turbo`)
+  - One representative thumbnail frame, summarized with the same Groq vision model used for images
+- Transcript text and frame summaries are each stored as separate `AssetEmbedding` units (`video_transcript`, `video_frame_summary`) linked to the video's `Asset` node, so a search query can match either the spoken content or the visual content of a video.
+- A `video_index_state` marker is written once a video finishes processing, used to detect and skip already-completed videos on re-index.
+
+### Requirements
+
+Image and video indexing require:
+- `ffmpeg` and `ffprobe` installed and available on `PATH` (videos only)
+- `GROQ_API_KEY` set in `.env`
+
+If `GROQ_API_KEY` is missing or invalid, image and video indexing are skipped automatically — text indexing still completes normally.
+
+```bash
+# ffmpeg/ffprobe (Ubuntu)
+sudo apt-get install -y ffmpeg
+```
+
+### Search results
+
+Search results for images and videos include:
+- `match_kind` — which part of the asset matched (`video_transcript`, `video_frame_summary`, or the image summary)
+- `content` — a text preview of the matched transcript or summary
+- `thumbnail_url` — a cached preview thumbnail (videos only)
+
+### Known limitations
+
+- HelixDB's enterprise-dev container stores everything in memory — restarting it wipes all indexed images and videos along with text.
+- Groq's free tier has both per-minute and per-day token limits. Large batches of images/videos can hit these limits; when this happens, image/video indexing for the affected files will show as errored in the job status while text indexing is unaffected.
 
 ---
 
@@ -53,6 +100,7 @@ Tested and verified on Ubuntu 24.04 LTS.
 - Rust stable — for building the sidecar backend
 - Node.js 20+ — react-router-dom and other packages require Node 20+
 - build-essential — C compiler required for cargo build
+- ffmpeg — required for video indexing (see Image & Video Indexing section above)
 
 ### Step 1 — Install system dependencies
 
@@ -60,6 +108,9 @@ Tested and verified on Ubuntu 24.04 LTS.
 # C compiler and OpenSSL (required for cargo build)
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libssl-dev
+
+# ffmpeg (required for video indexing)
+sudo apt-get install -y ffmpeg
 
 # Docker
 sudo apt-get install -y docker.io
@@ -80,6 +131,8 @@ sudo apt-get install -y nodejs
 node --version    # must be v20+
 rustc --version
 docker --version
+ffmpeg -version
+ffprobe -version
 
 # HelixDB CLI
 curl -fsSL https://install.helix-db.com | bash
@@ -236,14 +289,9 @@ If you see `indexed=2, errors=0` and results in the search response — everythi
 | `indexed=0, errors=N` | Bad API key or HelixDB not running | Check VOYAGE_API_KEY and run `curl http://localhost:6969` |
 | `pkg-config not found` | Missing system library | `sudo apt-get install -y pkg-config libssl-dev` |
 | `Docker not available` | Docker not installed or not running | Install docker.io and run `sudo systemctl start docker` |
-
----
-
-## Rate limits
-
-Voyage AI free tier: 3 RPM. The indexer has a built-in 21-second delay between embedding calls to stay within this limit. Indexing 3 files takes approximately 2 minutes.
-
-To remove the delay: add a payment method at https://dashboard.voyageai.com (rate limit increases to 300+ RPM), then remove the two `sleep(Duration::from_secs(21))` calls in `src/sidecar/rpc/indexing/text/mod.rs`.
+| `ffprobe failed: No such file or directory` | ffmpeg not installed | `sudo apt-get install -y ffmpeg` |
+| Video/image indexing skipped silently | GROQ_API_KEY missing or invalid | Add a valid key to `.env`; text indexing continues regardless |
+| Frame summaries missing from search results | Groq token rate limit hit during indexing | Re-index later once the limit resets; check sidecar logs for `429` errors |
 
 ---
 
