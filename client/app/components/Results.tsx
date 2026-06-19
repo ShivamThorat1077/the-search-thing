@@ -325,13 +325,27 @@ const Results: React.FC<ResultsWithContextProps> = ({
                 >
                   <div className="pr-2 shrink-0">
                     <img
-                      src={fileIcons[getFileExt(result.path).toLowerCase()] || fileIcons.txt}
+                      src={
+                        fileIcons[getFileExt(result.path).toLowerCase()] ||
+                        (result.label === "video" ? fileIcons.mp4 ?? fileIcons.txt : fileIcons.txt)
+                      }
                       className="w-5 h-5"
                       alt=""
                     />
                   </div>
-                  <div className="min-w-0 flex-1 text-zinc-100 truncate" title={result.path}>
-                    {getFileName(result.path)}
+                  <div className="min-w-0 flex-1 flex flex-col">
+                    <div className="text-zinc-100 truncate" title={result.path}>
+                      {getFileName(result.path)}
+                    </div>
+                    {result.match_kind && result.match_kind !== "file_path" && (
+                      <div className="text-zinc-500 text-[0.65rem] truncate">
+                        {result.match_kind === "video_transcript"
+                          ? "transcript"
+                          : result.match_kind === "video_frame_summary"
+                          ? "frame"
+                          : result.match_kind}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))
