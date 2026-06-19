@@ -47,3 +47,4 @@ helix-rs-local/
 target/
 client/node_modules/
 client/out/
+client/resources/sidecar/
