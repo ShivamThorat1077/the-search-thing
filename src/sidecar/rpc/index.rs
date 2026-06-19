@@ -336,22 +336,26 @@ fn spawn_rust_index_job(job_id: String, dir: String) {
                 return;
             }
         };
+        // Ensure HelixDB indexes exist before any indexing begins.
+        // Idempotent — safe to call on every job (in-memory storage wipes on restart).
+        if let Err(error) = runtime.block_on(store.ensure_indexes()) {
+            eprintln!(
+                "[sidecar:index] job {} failed to ensure indexes: {}",
+                job_id, error
+            );
+        }
+
         let groq = match GroqClient::from_env() {
-            Ok(client) => client,
+            Ok(client) => Some(client),
             Err(error) => {
-                let error_message = error.clone();
-                let _ = update_job(&job_id, |job| {
-                    job.status = "failed".to_string();
-                    job.phase = "done".to_string();
-                    job.error = error;
-                    job.message = "Indexing failed".to_string();
-                    job.finished_at = Some(now_string());
-                });
                 eprintln!(
-                    "[sidecar:index] job {} failed to initialize Groq client: {}",
-                    job_id, error_message
+                    "[sidecar:index] job {} Groq unavailable, video indexing will be skipped: {}",
+                    job_id, error
                 );
-                return;
+                let _ = update_job(&job_id, |job| {
+                    job.message = "Groq unavailable — skipping video/image indexing".to_string();
+                });
+                None
             }
         };
 
@@ -409,90 +413,18 @@ fn spawn_rust_index_job(job_id: String, dir: String) {
         let video_found = video_files.len();
         let mut video_indexed = 0usize;
         let mut video_errors = 0usize;
-        let video_skipped = 0usize;
+        let mut video_skipped = 0usize;
         let mut first_video_error: Option<String> = None;
 
-        let output_dir = env::current_dir()
-            .map(|d| d.join("videos").join("output_indexer"))
-            .unwrap_or_else(|_| Path::new("videos/output_indexer").to_path_buf());
-        let output_dir_str = output_dir.to_string_lossy().replace('\\', "/");
-
-        let _ = update_job(&job_id, |job| {
-            job.video_found = video_found;
-            job.phase = "index_video".to_string();
-            job.message = "Indexing video files (Rust sidecar)".to_string();
-        });
-        eprintln!(
-            "[sidecar:index] job {} video pass starting: {} candidate files",
-            job_id, video_found
-        );
-
-        for video_path in video_files {
-            let content_hash = match runtime.block_on(hasher.compute_file_hash(&video_path)) {
-                Ok(hash) => hash,
-                Err(error) => {
-                    video_errors += 1;
-                    if first_video_error.is_none() {
-                        first_video_error = Some(format_video_result_error(&video_path, &error));
-                    }
-                    eprintln!(
-                        "[sidecar:index] job {} failed to hash video {}: {}",
-                        job_id, video_path, error
-                    );
-                    continue;
-                }
-            };
-
-            let result = runtime.block_on(index_video_with_sidecar(
-                &content_hash,
-                &video_path,
-                &output_dir_str,
-                30.0,
-                &groq,
-                &store,
-            ));
-
-            match result {
-                Ok(r) if r.indexed => {
-                    video_indexed += 1;
-                    eprintln!(
-                        "[sidecar:index] job {} indexed video {}",
-                        job_id, video_path
-                    );
-                }
-                Ok(r) => {
-                    video_errors += 1;
-                    let error_message = r
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "video produced no searchable chunks".to_string());
-                    if first_video_error.is_none() {
-                        first_video_error =
-                            Some(format_video_result_error(&video_path, &error_message));
-                    }
-                    eprintln!(
-                        "[sidecar:index] job {} video indexing returned not-indexed for {}: {}",
-                        job_id, video_path, error_message
-                    );
-                }
-                Err(error) => {
-                    video_errors += 1;
-                    if first_video_error.is_none() {
-                        first_video_error = Some(format_video_result_error(&video_path, &error));
-                    }
-                    eprintln!(
-                        "[sidecar:index] job {} video indexing failed for {}: {}",
-                        job_id, video_path, error
-                    );
-                }
-            }
-
-            let _ = update_job(&job_id, |job| {
-                job.video_indexed = video_indexed;
-                job.video_errors = video_errors;
-                job.video_skipped = video_skipped;
+        let output_dir = std::env::var("VIDEO_OUTPUT_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("videos").join("output_indexer")))
+                    .unwrap_or_else(|| Path::new("videos/output_indexer").to_path_buf())
             });
-        }
+        let output_dir_str = output_dir.to_string_lossy().replace('\\', "/");
 
         let image_files =
             collect_video_files_with_ignore(&dir, &image_exts, &ignore_exts, &ignore_files);
@@ -500,57 +432,147 @@ fn spawn_rust_index_job(job_id: String, dir: String) {
         let mut image_indexed = 0usize;
         let mut image_errors = 0usize;
         let mut image_skipped = 0usize;
+        let mut first_image_error: Option<String> = None;
 
-        let _ = update_job(&job_id, |job| {
-            job.image_found = image_found;
-            job.phase = "index_image".to_string();
-            job.message = "Indexing image files (Rust sidecar)".to_string();
-        });
-        eprintln!(
-            "[sidecar:index] job {} image pass starting: {} candidate files",
-            job_id, image_found
-        );
+        if let Some(ref groq) = groq {
+            let _ = update_job(&job_id, |job| {
+                job.video_found = video_found;
+                job.phase = "index_video".to_string();
+                job.message = "Indexing video files (Rust sidecar)".to_string();
+            });
+            eprintln!(
+                "[sidecar:index] job {} video pass starting: {} candidate files",
+                job_id, video_found
+            );
 
-        let image_results =
-            runtime.block_on(image_indexer_with_sidecar(image_files, &groq, &store));
-        let first_image_error = image_results.iter().find_map(|result| {
-            result
-                .error
-                .as_ref()
-                .filter(|error| error.as_str() != "Duplicate content hash")
-                .map(|error| format_image_result_error(&result.path, error))
-        });
-        for result in image_results {
-            if result.indexed {
-                image_indexed += 1;
-                eprintln!(
-                    "[sidecar:index] job {} indexed image {}",
-                    job_id, result.path
-                );
-            } else if result.error.as_deref() == Some("Duplicate content hash") {
-                image_skipped += 1;
-                eprintln!(
-                    "[sidecar:index] job {} skipping duplicate image {}",
-                    job_id, result.path
-                );
-            } else {
-                image_errors += 1;
-                eprintln!(
-                    "[sidecar:index] job {} image indexing failed for {}: {}",
-                    job_id,
-                    result.path,
-                    result
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "unknown error".to_string())
-                );
+            for video_path in video_files {
+                let content_hash = match runtime.block_on(hasher.compute_file_hash(&video_path)) {
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        video_errors += 1;
+                        if first_video_error.is_none() {
+                            first_video_error = Some(format_video_result_error(&video_path, &error));
+                        }
+                        eprintln!(
+                            "[sidecar:index] job {} failed to hash video {}: {}",
+                            job_id, video_path, error
+                        );
+                        continue;
+                    }
+                };
+
+                let result = runtime.block_on(index_video_with_sidecar(
+                    &content_hash,
+                    &video_path,
+                    &output_dir_str,
+                    30.0,
+                    groq,
+                    &store,
+                ));
+
+                match result {
+                    Ok(r) if r.indexed => {
+                        video_indexed += 1;
+                        eprintln!(
+                            "[sidecar:index] job {} indexed video {}",
+                            job_id, video_path
+                        );
+                    }
+                    Ok(r) if r.error.as_deref() == Some("Duplicate content hash") => {
+                        video_skipped += 1;
+                        eprintln!(
+                            "[sidecar:index] job {} skipping duplicate video {}",
+                            job_id, video_path
+                        );
+                    }
+                    Ok(r) => {
+                        video_errors += 1;
+                        let error_message = r
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "video produced no searchable chunks".to_string());
+                        if first_video_error.is_none() {
+                            first_video_error =
+                                Some(format_video_result_error(&video_path, &error_message));
+                        }
+                        eprintln!(
+                            "[sidecar:index] job {} video indexing returned not-indexed for {}: {}",
+                            job_id, video_path, error_message
+                        );
+                    }
+                    Err(error) => {
+                        video_errors += 1;
+                        if first_video_error.is_none() {
+                            first_video_error = Some(format_video_result_error(&video_path, &error));
+                        }
+                        eprintln!(
+                            "[sidecar:index] job {} video indexing failed for {}: {}",
+                            job_id, video_path, error
+                        );
+                    }
+                }
+
+                let _ = update_job(&job_id, |job| {
+                    job.video_indexed = video_indexed;
+                    job.video_errors = video_errors;
+                    job.video_skipped = video_skipped;
+                });
             }
 
             let _ = update_job(&job_id, |job| {
-                job.image_indexed = image_indexed;
-                job.image_errors = image_errors;
-                job.image_skipped = image_skipped;
+                job.image_found = image_found;
+                job.phase = "index_image".to_string();
+                job.message = "Indexing image files (Rust sidecar)".to_string();
             });
+            eprintln!(
+                "[sidecar:index] job {} image pass starting: {} candidate files",
+                job_id, image_found
+            );
+
+            let image_results =
+                runtime.block_on(image_indexer_with_sidecar(image_files, groq, &store));
+            first_image_error = image_results.iter().find_map(|result| {
+                result
+                    .error
+                    .as_ref()
+                    .filter(|error| error.as_str() != "Duplicate content hash")
+                    .map(|error| format_image_result_error(&result.path, error))
+            });
+            for result in image_results {
+                if result.indexed {
+                    image_indexed += 1;
+                    eprintln!(
+                        "[sidecar:index] job {} indexed image {}",
+                        job_id, result.path
+                    );
+                } else if result.error.as_deref() == Some("Duplicate content hash") {
+                    image_skipped += 1;
+                    eprintln!(
+                        "[sidecar:index] job {} skipping duplicate image {}",
+                        job_id, result.path
+                    );
+                } else {
+                    image_errors += 1;
+                    eprintln!(
+                        "[sidecar:index] job {} image indexing failed for {}: {}",
+                        job_id,
+                        result.path,
+                        result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "unknown error".to_string())
+                    );
+                }
+
+                let _ = update_job(&job_id, |job| {
+                    job.image_indexed = image_indexed;
+                    job.image_errors = image_errors;
+                    job.image_skipped = image_skipped;
+                });
+            }
+        } else {
+            video_skipped += video_found;
+            image_skipped += image_found;
         }
 
         let _ = update_job(&job_id, |job| {
@@ -589,6 +611,16 @@ fn spawn_rust_index_job(job_id: String, dir: String) {
                 job.error.clear();
             }
         });
+        // Rebuild the HNSW vector index now that all embeddings for this job
+        // have been inserted. create_vector_index_nodes is idempotent
+        // (if_not_exists), but HelixDB's HNSW doesn't appear to pick up
+        // nodes inserted after index creation, so we re-run it post-insert.
+        if let Err(error) = runtime.block_on(store.rebuild_vector_index()) {
+            eprintln!(
+                "[sidecar:index] job {} failed to rebuild vector index after indexing: {}",
+                job_id, error
+            );
+        }
         eprintln!(
             "[sidecar:index] job {} finished: text(indexed={}, errors={}, skipped={}), video(indexed={}, errors={}, skipped={}), image(indexed={}, errors={}, skipped={})",
             job_id,
