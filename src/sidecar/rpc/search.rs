@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,6 @@ use crate::sidecar::protocol::{
     err_response, ok_response, parse_params, JsonRpcRequest, JsonRpcResponse,
 };
 use crate::sidecar::rpc::indexing::adapters::helix::HelixTextStore;
-use crate::sidecar::rpc::indexing::adapters::voyage::{EmbeddingClient, VoyageClient};
 
 #[derive(Debug, Deserialize)]
 struct SearchQueryParams {
@@ -25,7 +24,6 @@ fn infer_thumbnails_dir() -> PathBuf {
     if let Ok(custom_dir) = env::var("THUMBNAILS_DIR") {
         return PathBuf::from(custom_dir);
     }
-
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("videos")
@@ -37,7 +35,6 @@ fn infer_extracted_thumbnails_dir() -> PathBuf {
     if let Ok(custom_dir) = env::var("EXTRACTED_THUMBNAILS_DIR") {
         return PathBuf::from(custom_dir);
     }
-
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("videos")
@@ -53,16 +50,13 @@ fn find_extracted_thumbnail(video_path: &str) -> Option<PathBuf> {
     if stem.is_empty() {
         return None;
     }
-
     let extracted_dir = infer_extracted_thumbnails_dir();
-
     for name in ["middle.jpg", "start.jpg", "end.jpg"] {
         let direct = extracted_dir.join(&stem).join(name);
         if direct.exists() {
             return Some(direct);
         }
     }
-
     let prefix = format!("{}_chunk_", stem);
     let mut candidates = fs::read_dir(&extracted_dir)
         .ok()?
@@ -80,9 +74,7 @@ fn find_extracted_thumbnail(video_path: &str) -> Option<PathBuf> {
             }
         })
         .collect::<Vec<_>>();
-
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
-
     for (_, dir) in candidates {
         for name in ["middle.jpg", "start.jpg", "end.jpg"] {
             let candidate = dir.join(name);
@@ -91,7 +83,6 @@ fn find_extracted_thumbnail(video_path: &str) -> Option<PathBuf> {
             }
         }
     }
-
     None
 }
 
@@ -99,17 +90,14 @@ fn resolve_thumbnail_path(content_hash: &str, video_path: &str) -> Option<String
     if content_hash.is_empty() {
         return None;
     }
-
     let cache_dir = infer_thumbnails_dir();
     let cached = cache_dir.join(format!("{}.jpg", content_hash));
     if cached.exists() {
         return Some(cached.to_string_lossy().replace('\\', "/"));
     }
-
     let source = find_extracted_thumbnail(video_path)?;
     fs::create_dir_all(&cache_dir).ok()?;
     fs::copy(source, &cached).ok()?;
-
     Some(cached.to_string_lossy().replace('\\', "/"))
 }
 
@@ -167,13 +155,23 @@ fn normalize_search_result(label: &str, result: Result<Value, String>) -> Result
     }
 }
 
+// ---------------------------------------------------------------------------
+// Distance threshold.
+// HelixDB returns $distance (lower = more similar, 0.0 = identical).
+// Voyage cosine distances range roughly 0.0–2.0.
+// Default 0.30 for image_caption units — captions are rich text so a tighter
+// threshold is appropriate. Override via SEARCH_DISTANCE_THRESHOLD env var.
+// ---------------------------------------------------------------------------
+fn distance_threshold() -> f64 {
+    env::var("SEARCH_DISTANCE_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.30)
+}
+
 async fn rust_helix_search_query(query: &str) -> Result<Value, String> {
     let store = HelixTextStore::from_env()?;
-    let voyage = VoyageClient::from_env()?;
-
-    // Embed the query using the query-optimised model (embed_query, not embed_document).
-    let vector_f64 = voyage.embed_query(query).await?;
-    let vector_f32: Vec<f32> = vector_f64.into_iter().map(|v| v as f32).collect();
+    let vector_f32 = store.embed_search_query(query).await?;
 
     let backend_timeout_ms = env::var("SIDECAR_SEARCH_BACKEND_TIMEOUT_MS")
         .ok()
@@ -195,48 +193,109 @@ async fn rust_helix_search_query(query: &str) -> Result<Value, String> {
         }
     };
 
-    // Response shape: { "assets": {"properties": [...]}, "embeddings": {"properties": [...]} }
-    // Helix wraps value_map results in a "properties" key.
-    let assets_raw = response
-        .get("assets")
+    // -----------------------------------------------------------------------
+    // Response shape from HelixDB (after search_asset_embeddings now returns
+    // embeddings only — no assets array):
+    //   embeddings.properties[] — AssetEmbedding nodes {
+    //       $id, $distance, unit_kind, unit_key, content, vector
+    //   }
+    //
+    // Strategy:
+    //   1. Iterate embeddings, skip file_path units (too short/generic).
+    //   2. Keep embeddings whose $distance <= threshold.
+    //   3. Sort by distance ascending.
+    //   4. Fetch the connected Asset for each matched embedding via
+    //      store.get_assets_for_embedding_ids() — preserves 1:1 mapping.
+    //   5. Deduplicate by content_hash, keeping the first (best distance).
+    // -----------------------------------------------------------------------
+
+    let embeddings_raw = response
+        .get("embeddings")
         .map(|v| v.get("properties").unwrap_or(v))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
 
-    // For assets with multiple chunks (videos), keep the earliest-appearing chunk index.
-    let mut best_pos: HashMap<String, (usize, Value)> = HashMap::new();
-    for (idx, asset) in assets_raw.iter().enumerate() {
-        let Some(asset_map) = asset.as_object() else {
+    let threshold = distance_threshold();
+
+    // Filter and collect (distance, embedding_$id) for non-noise units.
+    let mut relevant: Vec<(f64, i64, String)> = Vec::new();
+    for emb in &embeddings_raw {
+        let Some(obj) = emb.as_object() else { continue };
+        let unit_kind = value_as_string(obj.get("unit_kind")).unwrap_or_default();
+        // Skip indexing noise units — these are internal bookkeeping, not real content.
+        if unit_kind == "file_path" || unit_kind == "video_index_state" {
             continue;
-        };
-        let Some(path) = value_as_string(asset_map.get("path")) else {
-            continue;
-        };
-        best_pos.entry(path).or_insert_with(|| (idx, asset.clone()));
+        }
+        let dist = obj.get("$distance").and_then(Value::as_f64).unwrap_or(f64::MAX);
+        let id = obj.get("$id").and_then(Value::as_i64).unwrap_or(-1);
+        let content = value_as_string(obj.get("content")).unwrap_or_default();
+        eprintln!(
+            "[sidecar:search] embedding $id={} distance={:.4} unit_kind={} content_preview={}",
+            id, dist, unit_kind,
+            &content[..content.len().min(80)]
+        );
+        if dist <= threshold && id >= 0 {
+            relevant.push((dist, id, unit_kind.clone()));
+        } else {
+            eprintln!(
+                "[sidecar:search] FILTERED OUT $id={} distance={:.4} unit_kind={}",
+                id, dist, unit_kind
+            );
+        }
     }
 
-    let mut ranked: Vec<(usize, Value)> = best_pos.into_values().collect();
-    ranked.sort_by_key(|(idx, _)| *idx);
+    // Sort ascending — best match first.
+    relevant.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
+    eprintln!(
+        "[sidecar:search] {}/{} caption embeddings passed distance threshold {:.2}",
+        relevant.len(),
+        embeddings_raw.iter().filter(|e| {
+            e.as_object()
+                .and_then(|o| o.get("unit_kind"))
+                .and_then(Value::as_str)
+                .map(|u| u != "file_path" && u != "video_index_state")
+                .unwrap_or(false)
+        }).count(),
+        threshold
+    );
+
+    if relevant.is_empty() {
+        return Ok(json!({ "query": query, "results": [] }));
+    }
+
+    // Fetch assets for matched embedding IDs (1:1, preserves order).
+    let ids: Vec<i64> = relevant.iter().map(|(_, id, _)| *id).collect();
+    let assets_value = store.get_assets_for_embedding_ids(ids).await?;
+    let assets_arr = assets_value.as_array().cloned().unwrap_or_default();
+
+    // Deduplicate by content_hash, keeping first occurrence (lowest distance).
+    let mut seen: HashSet<String> = HashSet::new();
     let mut results: Vec<Value> = Vec::new();
-    for (_, node) in ranked {
-        let Some(map) = node.as_object() else {
-            continue;
-        };
-        let Some(path) = value_as_string(map.get("path")) else {
-            continue;
-        };
 
+    for ((dist, id, unit_kind), asset) in relevant.iter().zip(assets_arr.iter()) {
+        if asset.is_null() { continue; }
+        let Some(map) = asset.as_object() else { continue };
+        let Some(hash) = value_as_string(map.get("content_hash")) else { continue };
+        if !seen.insert(hash.clone()) { continue; }
+        let Some(path) = value_as_string(map.get("path")) else { continue };
         let kind = value_as_string(map.get("kind")).unwrap_or_else(|| "file".to_string());
-        let content_hash = value_as_string(map.get("content_hash")).unwrap_or_default();
+
+        // Find the matching embedding's content text
+        let content_preview = embeddings_raw.iter()
+            .find(|e| e.get("$id").and_then(Value::as_i64) == Some(*id))
+            .and_then(|e| e.get("content").and_then(Value::as_str))
+            .map(|s| s.chars().take(300).collect::<String>());
 
         let mut result = json!({
             "label": kind,
             "path": path,
+            "score": (1.0 - dist).max(0.0),
+            "match_kind": unit_kind,
+            "content": content_preview,
         });
 
-        // For text files, read content so the frontend can render a preview.
         if kind == "file" {
             if let Ok(text) = fs::read_to_string(&path) {
                 result["content"] = Value::String(text);
@@ -244,7 +303,7 @@ async fn rust_helix_search_query(query: &str) -> Result<Value, String> {
         }
 
         if kind == "video" {
-            if let Some(thumbnail_path) = resolve_thumbnail_path(&content_hash, &path) {
+            if let Some(thumbnail_path) = resolve_thumbnail_path(&hash, &path) {
                 result["thumbnail_url"] = Value::String(format!(
                     "localimg://preview?path={}",
                     percent_encode(&thumbnail_path)
@@ -254,6 +313,12 @@ async fn rust_helix_search_query(query: &str) -> Result<Value, String> {
 
         results.push(result);
     }
+
+    results.sort_by(|a, b| {
+        let sa = a.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+        let sb = b.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(json!({
         "query": query,
