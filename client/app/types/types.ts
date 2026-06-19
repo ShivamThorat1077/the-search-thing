@@ -3,6 +3,8 @@ export interface SearchResultItem {
   content?: string | null;
   path: string;
   thumbnail_url?: string | null;
+  match_kind?: string;
+  tsmatch_kind?: string;
 }
 
 export interface SearchResponse {
