@@ -2,8 +2,6 @@ use crate::sidecar::rpc::fs::walk_and_get_files_content;
 use crate::sidecar::rpc::indexing::adapters::hash::PathHasher;
 use crate::sidecar::rpc::indexing::adapters::store::TextIndexStore;
 use std::path::Path;
-use std::time::Duration;
-use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 pub struct TextIndexResult {
@@ -104,6 +102,10 @@ pub async fn file_indexer(
                 continue;
             }
 
+            // Rate limiting is handled centrally in HelixTextStore::build_document_vector.
+            // No sleeps needed here — each create_file_asset_embeddings call will
+            // automatically wait if it's too soon since the last Voyage request.
+
             if let Err(error) = store
                 .create_file_asset_embeddings(&content_hash, "file_body", "file_body", &content)
                 .await
@@ -117,10 +119,6 @@ pub async fn file_indexer(
                 });
                 continue;
             }
-
-            // Rate limit: Voyage free tier = 3 RPM (1 call per 20s).
-            // Sleep before the second embedding call (file_path) for this file.
-            sleep(Duration::from_secs(21)).await;
 
             let filename_text = Path::new(&file_path)
                 .file_stem()
@@ -143,9 +141,6 @@ pub async fn file_indexer(
                     );
                 }
             }
-
-            // Rate limit: sleep before the next file's first embedding call.
-            sleep(Duration::from_secs(21)).await;
 
             results.push(TextIndexResult {
                 path: file_path,
