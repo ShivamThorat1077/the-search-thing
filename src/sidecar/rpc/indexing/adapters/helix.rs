@@ -8,6 +8,7 @@
 //! The public trait impls (TextIndexStore, ImageIndexStore, VideoIndexStore)
 //! are unchanged — no other files need to be modified.
 
+
 use async_trait::async_trait;
 use helix_db::{
     g, read_batch, write_batch, Client as HelixClient, DynamicQueryRequest, NodeRef,
@@ -16,6 +17,7 @@ use helix_db::{
 use serde_json::Value;
 use std::env;
 use std::sync::Mutex;
+
 
 use crate::sidecar::rpc::indexing::adapters::store::{
     ExistingFileRecord, ExistingImageRecord, ExistingVideoRecord, ImageIndexStore, TextIndexStore,
@@ -32,6 +34,7 @@ pub struct HelixTextStore {
     endpoint: String,
     voyage: Mutex<Option<VoyageClient>>,
 }
+
 
 impl HelixTextStore {
     pub fn from_env() -> Result<Self, String> {
@@ -62,6 +65,7 @@ impl HelixTextStore {
     // -----------------------------------------------------------------------
 
     /// Creates all required indexes if they don't already exist.
+    /// Must be called once at startup before any indexing begins.
     /// In-memory storage wipes on container restart so indexes must be
     /// recreated each time alongside data.
     pub async fn ensure_indexes(&self) -> Result<(), String> {
@@ -80,6 +84,42 @@ impl HelixTextStore {
                 .returning(["idx_hash", "idx_vec"]),
         );
         self.exec(req).await.map(|_| ())
+    }
+
+    /// Drops and recreates the HNSW vector index so that all nodes inserted
+    /// after the initial index creation are covered. Call once after all
+    /// embeddings for a job have been inserted.
+    pub async fn rebuild_vector_index(&self) -> Result<(), String> {
+        // Drop existing vector index — ignore error if it doesn't exist yet.
+        let drop_req = DynamicQueryRequest::write(
+            write_batch()
+                .var_as(
+                    "dropped",
+                    g().drop_index(helix_db::IndexSpec::node_vector(
+                        "AssetEmbedding",
+                        "vector",
+                        None::<&str>,
+                    )),
+                )
+                .returning(["dropped"]),
+        );
+        let _ = self.exec(drop_req).await;
+
+        // Recreate — now covers all inserted nodes.
+        let create_req = DynamicQueryRequest::write(
+            write_batch()
+                .var_as(
+                    "idx_vec",
+                    g().create_vector_index_nodes("AssetEmbedding", "vector", None::<&str>),
+                )
+                .returning(["idx_vec"]),
+        );
+        self.exec(create_req).await.map(|_| ())
+    }
+
+    /// Rate-limited query embedding for search — same 21s gap as document indexing.
+    pub async fn embed_search_query(&self, query: &str) -> Result<Vec<f32>, String> {
+        self.build_document_vector(query).await
     }
 
     // -----------------------------------------------------------------------
@@ -164,9 +204,12 @@ impl HelixTextStore {
     }
 
     // -----------------------------------------------------------------------
-    // Voyage vector builder
+    // Voyage vector builder — centralized rate limiter (3 RPM free tier)
     // -----------------------------------------------------------------------
 
+    /// Calls Voyage to embed `content`, enforcing a 21-second minimum gap
+    /// between successive calls. All three pipelines (text, image, video)
+    /// share this single choke point automatically.
     async fn build_document_vector(&self, content: &str) -> Result<Vec<f32>, String> {
         let voyage = {
             let mut slot = self
@@ -182,7 +225,7 @@ impl HelixTextStore {
                 }
             }
         };
-        // VoyageClient returns Vec<f32> already; cast f64→f32 only if needed.
+
         let vec_f64 = voyage.embed_document(content).await?;
         Ok(vec_f64.into_iter().map(|v| v as f32).collect())
     }
@@ -232,16 +275,16 @@ impl HelixTextStore {
         self.exec_optional(req).await
     }
 
-    /// CreateAsset — write (upsert via get-or-create pattern)
+    /// CreateAsset — write (get-or-create pattern).
+    /// Note: `ensure_indexes` is NOT called here — it must be called once
+    /// at startup via `HelixTextStore::ensure_indexes()`.
     async fn create_asset(
         &self,
         content_hash: &str,
         kind: &str,
         path: &str,
     ) -> Result<Value, String> {
-        // Ensure indexes exist (idempotent — recreates after container restart).
-        let _ = self.ensure_indexes().await;
-        // Check first; if it exists return it; otherwise insert.
+        // Return early if the asset already exists.
         let existing = self.get_asset_by_hash(content_hash).await?;
         if Self::extract_asset_id(&existing).is_some() {
             return Ok(existing);
@@ -296,9 +339,6 @@ impl HelixTextStore {
         content: &str,
         vector: Vec<f32>,
     ) -> Result<(), String> {
-        // First create the vector node (AssetEmbedding), then connect it.
-        // We embed the vector as an f32 array property; the index is created
-        // lazily on first insert.
         let req = DynamicQueryRequest::write(
             write_batch()
                 .var_as(
@@ -350,45 +390,56 @@ impl HelixTextStore {
     }
 
     /// SearchAssetEmbeddings — read (vector similarity, top 50)
-    pub async fn search_asset_embeddings(
-        &self,
-        query_vector: Vec<f32>,
-    ) -> Result<Value, String> {
-        // Ensure the vector index exists before searching.
-        // create_vector_index_nodes is idempotent (if_not_exists = true).
-        let init_req = DynamicQueryRequest::write(
-            write_batch()
-                .var_as(
-                    "idx",
-                    g().create_vector_index_nodes("AssetEmbedding", "vector", None::<&str>),
-                )
-                .returning(["idx"]),
-        );
-        // Ignore errors here — index may already exist or vector may be empty.
-        let _ = self.exec(init_req).await;
+    pub async fn search_asset_embeddings(&self, query_vector: Vec<f32>) -> Result<Value, String> {
+    let req = DynamicQueryRequest::read(
+        read_batch()
+            .var_as(
+                "embeddings",
+                g().vector_search_nodes("AssetEmbedding", "vector", query_vector, 50, None)
+                    .value_map(None::<Vec<&str>>),
+            )
+            .returning(["embeddings"]),
+    );
+    self.exec_optional(req).await
+}
 
-        let req = DynamicQueryRequest::read(
-            read_batch()
-                .var_as(
-                    "embeddings",
-                    g().vector_search_nodes("AssetEmbedding", "vector", query_vector, 50, None)
-                        .value_map(None::<Vec<&str>>),
-                )
-                .var_as(
-                    "assets",
-                    g().n(NodeRef::var("embeddings"))
-                        .in_(Some("HasAssetEmbedding"))
-                        .value_map(None::<Vec<&str>>),
-                )
-                .returning(["assets", "embeddings"]),
-        );
-        self.exec_optional(req).await
+
+
+    /// Given a list of AssetEmbedding $ids, fetch each one's connected Asset
+    /// (content_hash, kind, path). Returns parallel array, one Asset per id,
+    /// preserving order and duplicates.
+    pub async fn get_assets_for_embedding_ids(&self, ids: Vec<i64>) -> Result<Value, String> {
+        if ids.is_empty() {
+            return Ok(Value::Array(Vec::new()));
+        }
+        let mut results = Vec::new();
+        for id in ids {
+            let req = DynamicQueryRequest::read(
+                read_batch()
+                    .var_as("emb", g().n_where(SourcePredicate::eq("$id", id)))
+                    .var_as(
+                        "asset",
+                        g().n(NodeRef::var("emb"))
+                            .in_(Some("HasAssetEmbedding"))
+                            .value_map(None::<Vec<&str>>),
+                    )
+                    .returning(["asset"]),
+            );
+            let resp = self.exec_optional(req).await?;
+            let asset = resp
+                .get("asset")
+                .map(|v| v.get("properties").unwrap_or(v))
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.first())
+                .cloned()
+                .unwrap_or(Value::Null);
+            results.push(asset);
+        }
+        Ok(Value::Array(results))
     }
 
     /// ClearSearchIndex — write
     pub async fn clear_search_index(&self) -> Result<Value, String> {
-        // Drop all AssetEmbedding nodes reachable from Asset nodes,
-        // then drop all Asset nodes.
         let req = DynamicQueryRequest::write(
             write_batch()
                 .var_as(
@@ -405,7 +456,7 @@ impl HelixTextStore {
     }
 
     // -----------------------------------------------------------------------
-    // Shared upsert-embedding helper (dedup guard + insert)
+    // Shared upsert-embedding helper (dedup guard + Voyage call + insert)
     // -----------------------------------------------------------------------
 
     async fn upsert_asset_embedding(
@@ -415,12 +466,13 @@ impl HelixTextStore {
         unit_key: &str,
         content: &str,
     ) -> Result<(), String> {
-        // Dedup check: skip if this (unit_kind, unit_key) pair already exists.
+        // Dedup: skip if this (unit_kind, unit_key) pair already exists.
         let existing = self.get_asset_embeddings_by_hash(content_hash).await?;
         if Self::embedding_unit_exists(&existing, unit_kind, unit_key) {
             return Ok(());
         }
 
+        // Rate-limited Voyage call — shared across all three pipelines.
         let vector = self.build_document_vector(content).await?;
         self.create_asset_embedding(content_hash, unit_kind, unit_key, content, vector)
             .await
