@@ -611,16 +611,6 @@ fn spawn_rust_index_job(job_id: String, dir: String) {
                 job.error.clear();
             }
         });
-        // Rebuild the HNSW vector index now that all embeddings for this job
-        // have been inserted. create_vector_index_nodes is idempotent
-        // (if_not_exists), but HelixDB's HNSW doesn't appear to pick up
-        // nodes inserted after index creation, so we re-run it post-insert.
-        if let Err(error) = runtime.block_on(store.rebuild_vector_index()) {
-            eprintln!(
-                "[sidecar:index] job {} failed to rebuild vector index after indexing: {}",
-                job_id, error
-            );
-        }
         eprintln!(
             "[sidecar:index] job {} finished: text(indexed={}, errors={}, skipped={}), video(indexed={}, errors={}, skipped={}), image(indexed={}, errors={}, skipped={})",
             job_id,

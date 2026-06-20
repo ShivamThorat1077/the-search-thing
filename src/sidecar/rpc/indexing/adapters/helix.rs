@@ -86,52 +86,6 @@ impl HelixTextStore {
         self.exec(req).await.map(|_| ())
     }
 
-    /// Drops and recreates the HNSW vector index so that all nodes inserted
-    /// after the initial index creation are covered. Call once after all
-    /// embeddings for a job have been inserted.
-    pub async fn rebuild_vector_index(&self) -> Result<(), String> {
-        // Drop existing vector index — ignore error if it doesn't exist yet.
-        let drop_req = DynamicQueryRequest::write(
-            write_batch()
-                .var_as(
-                    "dropped",
-                    g().drop_index(helix_db::IndexSpec::node_vector(
-                        "AssetEmbedding",
-                        "vector",
-                        None::<&str>,
-                    )),
-                )
-                .returning(["dropped"]),
-        );
-        let _ = self.exec(drop_req).await;
-
-        // Recreate — retry on concurrent-write conflicts instead of giving up
-        // and leaving the index missing entirely.
-        let mut attempts = 0;
-        loop {
-            let create_req = DynamicQueryRequest::write(
-                write_batch()
-                    .var_as(
-                        "idx_vec",
-                        g().create_vector_index_nodes("AssetEmbedding", "vector", None::<&str>),
-                    )
-                    .returning(["idx_vec"]),
-            );
-            match self.exec(create_req).await {
-                Ok(_) => return Ok(()),
-                Err(e) if e.to_lowercase().contains("concurrent write") && attempts < 5 => {
-                    attempts += 1;
-                    eprintln!(
-                        "[sidecar:helix] vector index recreate conflicted, retry {} in 500ms",
-                        attempts
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
     /// Rate-limited query embedding for search — same 21s gap as document indexing.
     pub async fn embed_search_query(&self, query: &str) -> Result<Vec<f32>, String> {
         self.build_document_vector(query).await
