@@ -105,16 +105,31 @@ impl HelixTextStore {
         );
         let _ = self.exec(drop_req).await;
 
-        // Recreate — now covers all inserted nodes.
-        let create_req = DynamicQueryRequest::write(
-            write_batch()
-                .var_as(
-                    "idx_vec",
-                    g().create_vector_index_nodes("AssetEmbedding", "vector", None::<&str>),
-                )
-                .returning(["idx_vec"]),
-        );
-        self.exec(create_req).await.map(|_| ())
+        // Recreate — retry on concurrent-write conflicts instead of giving up
+        // and leaving the index missing entirely.
+        let mut attempts = 0;
+        loop {
+            let create_req = DynamicQueryRequest::write(
+                write_batch()
+                    .var_as(
+                        "idx_vec",
+                        g().create_vector_index_nodes("AssetEmbedding", "vector", None::<&str>),
+                    )
+                    .returning(["idx_vec"]),
+            );
+            match self.exec(create_req).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e.to_lowercase().contains("concurrent write") && attempts < 5 => {
+                    attempts += 1;
+                    eprintln!(
+                        "[sidecar:helix] vector index recreate conflicted, retry {} in 500ms",
+                        attempts
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Rate-limited query embedding for search — same 21s gap as document indexing.
