@@ -86,9 +86,8 @@ impl HelixTextStore {
         self.exec(req).await.map(|_| ())
     }
 
-    /// Rate-limited query embedding for search — same 21s gap as document indexing.
     pub async fn embed_search_query(&self, query: &str) -> Result<Vec<f32>, String> {
-        self.build_document_vector(query).await
+        self.build_query_vector(query).await
     }
 
     // -----------------------------------------------------------------------
@@ -173,29 +172,36 @@ impl HelixTextStore {
     }
 
     // -----------------------------------------------------------------------
-    // Voyage vector builder — centralized rate limiter (3 RPM free tier)
+    // Voyage vector builders
     // -----------------------------------------------------------------------
 
-    /// Calls Voyage to embed `content`, enforcing a 21-second minimum gap
-    /// between successive calls. All three pipelines (text, image, video)
-    /// share this single choke point automatically.
-    async fn build_document_vector(&self, content: &str) -> Result<Vec<f32>, String> {
-        let voyage = {
-            let mut slot = self
-                .voyage
-                .lock()
-                .map_err(|e| format!("voyage client lock poisoned: {}", e))?;
-            match slot.as_mut() {
-                Some(c) => c.clone(),
-                None => {
-                    let c = VoyageClient::from_env()?;
-                    *slot = Some(c.clone());
-                    c
-                }
+    /// Obtain (or lazily initialise) the shared Voyage client.
+    fn get_voyage_client(&self) -> Result<VoyageClient, String> {
+        let mut slot = self
+            .voyage
+            .lock()
+            .map_err(|e| format!("voyage client lock poisoned: {}", e))?;
+        match slot.as_mut() {
+            Some(c) => Ok(c.clone()),
+            None => {
+                let c = VoyageClient::from_env()?;
+                *slot = Some(c.clone());
+                Ok(c)
             }
-        };
+        }
+    }
 
+    /// Embed content for indexing (uses Voyage `input_type: "document"`).
+    async fn build_document_vector(&self, content: &str) -> Result<Vec<f32>, String> {
+        let voyage = self.get_voyage_client()?;
         let vec_f64 = voyage.embed_document(content).await?;
+        Ok(vec_f64.into_iter().map(|v| v as f32).collect())
+    }
+
+    /// Embed a search query (uses Voyage `input_type: "query"`).
+    async fn build_query_vector(&self, query: &str) -> Result<Vec<f32>, String> {
+        let voyage = self.get_voyage_client()?;
+        let vec_f64 = voyage.embed_query(query).await?;
         Ok(vec_f64.into_iter().map(|v| v as f32).collect())
     }
 

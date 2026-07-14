@@ -102,10 +102,6 @@ pub async fn file_indexer(
                 continue;
             }
 
-            // Rate limiting is handled centrally in HelixTextStore::build_document_vector.
-            // No sleeps needed here — each create_file_asset_embeddings call will
-            // automatically wait if it's too soon since the last Voyage request.
-
             if let Err(error) = store
                 .create_file_asset_embeddings(&content_hash, "file_body", "file_body", &content)
                 .await
