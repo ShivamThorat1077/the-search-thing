@@ -51,7 +51,7 @@ In addition to text files, the indexer can process images and videos and make th
 ### How it works
 
 **Images**
-- Each image is sent to a Groq vision model (`meta-llama/llama-4-scout-17b-16e-instruct`), which returns a structured JSON summary (summary, objects, actions, setting, OCR text, quality).
+- Each image is sent to a Groq vision model (`qwen/qwen3.6-27b`), which returns a structured JSON summary (summary, objects, actions, setting, OCR text, quality).
 - The summary is formatted into embeddable text and stored as an `AssetEmbedding` linked to the image's `Asset` node.
 
 **Videos**

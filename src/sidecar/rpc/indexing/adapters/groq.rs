@@ -96,7 +96,7 @@ impl GroqClient {
         let prompt = "You are an expert vision assistant. Provide a concise JSON summary for the provided video frame. Respond with JSON only (no code fences). Use the schema: {\"summary\": \"<1-2 sentences>\", \"objects\": [\"...\"], \"actions\": [\"...\"], \"setting\": \"<location or scene>\", \"quality\": \"<good|low>\"}";
 
         let payload = json!({
-            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+            "model": "qwen/qwen3.6-27b",
             "messages": [{
                 "role": "user",
                 "content": [
@@ -176,7 +176,7 @@ impl GroqClient {
         let prompt = "You are an expert vision assistant. Provide a concise JSON summary for the provided image. Respond with JSON only (no code fences). Use the schema: {\"summary\": \"<1-2 sentences>\", \"objects\": [\"...\"], \"actions\": [\"...\"], \"setting\": \"<location or scene>\", \"ocr\": \"<visible text or empty>\", \"quality\": \"<good|low>\"}";
 
         let payload = json!({
-            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+            "model": "qwen/qwen3.6-27b",
             "messages": [{
                 "role": "user",
                 "content": [
